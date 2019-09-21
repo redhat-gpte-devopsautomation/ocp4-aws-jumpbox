@@ -3,7 +3,7 @@
   hosts: localhost
   connection: local
   vars:
-    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ lookup('env', 'GUID') }}-key.pub"
+    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
     GUID: "{{ lookup('env', 'GUID') }}"
     HOME: "{{ lookup('env', 'HOME') }}"
     ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
@@ -21,12 +21,14 @@
         aws_region: "{{ r_aws_region.content|regex_replace('.$', '') }}"
 
     - name: add region to aws client config
-      vars:
-      lineinfile:
+      ini_file:
         path: "{{ HOME }}/.aws/credentials"
-        regexp: '^region = '
-        insertafter: '^\[default'
-        line: "region = {{ aws_region }}"
+        section: "{{ item }}"
+        option: region
+        value: "{{ aws_region }}"
+      loop:
+        - default
+        - opentlc-labs
 
     - name: get latest AMI id for RHEL in my region
       shell: |
@@ -46,9 +48,48 @@
       include_tasks:
         file: ./setup_clientvm.yml
 
-    - name: add aws hosts to inventory
-      include_tasks:
-        file: ./aws_inventory.yml
+    - name: get control plane nodes
+      ec2_instance_facts:
+        profile: default
+      register: all_instances
+
+    - name: get control plane nodes
+      ec2_instance_facts:
+        profile: default
+        filters:
+          "tag:Name": "*master*"
+      register: control_plane
+
+    - name: add control_planes to inventory
+      add_host:
+        name: "{{ item.private_dns_name }}"
+        groups: control_plane
+      loop: "{{ control_plane.instances }}"
+      when: control_plane.instances[0] is defined
+
+    - name: get workers
+      ec2_instance_facts:
+        profile: default
+        filters:
+          "tag:Name": "*worker*"
+      register: workers
+
+    - name: add workers to inventory
+      add_host:
+        name: "{{ item.private_dns_name }}"
+        groups: workers
+      loop: "{{ workers.instances }}"
+      when: workers.instances[0] is defined
+
+    - name: is there a jumpbox?
+      ec2_instance_facts:
+        profile: default
+        filters:
+          "tag:type": "jumpbox"
+          instance-state-name: ["running", "initializing"]
+      register: jumpboxes
+
+
 
     #  - name: add existing jumpbox to inventory
     #    add_host:
@@ -62,14 +103,19 @@
 
         - name: Put the cluster keypair in AWS for jumphost
           ec2_key:
+            profile: default
             name: cluster_keypair
-            key_material: "{{ lookup('file', cluster_key_filename) }}"
+            key_material: "{{ lookup('file', '/home/ec2-user/.ssh/id_rsa.pub') }}"
 
         - name: Create SSH security group
+          vars:
+            cluster_vpc: "{{ control_plane.instances[0].vpc_id }}"
+            #cluster_region: "{{ control_plane.instances[0].placement.availability_zone| regex_replace('.$') }}"
           ec2_group:
+            profile: default
             name: jumpbox
             description: jumpbox description
-            region: "{{ cluster_region }}"
+            region: "{{ aws_region }}"
             vpc_id: "{{ cluster_vpc }}"
             rules:
               - proto: tcp
@@ -79,6 +125,7 @@
 
         - name: get vpc_subnet_id
           ec2_vpc_subnet_facts:
+            profile: default
             filters:
               vpc-id: "{{ sg_jumpbox.vpc_id }}"
               cidr-block: "10.0.0.0/20"
@@ -87,6 +134,7 @@
         - name: launch ec2 instance
           ec2:
             # name: "jumpbox"
+            profile: default
             key_name: "cluster_keypair"
             vpc_subnet_id: "{{ ec2_vpc_subnet_ids.subnets[0].subnet_id }}"
             instance_type: t2.micro
@@ -96,7 +144,7 @@
             # image_id: ami-0520e698dd500b1d1
             # image: ami-0520e698dd500b1d1
             image: "{{ rhel_ami_id }}"
-            region: "{{ cluster_region }}"
+            region: "{{ aws_region }}"
             assign_public_ip: true
             instance_tags:
               type: jumpbox
@@ -138,11 +186,11 @@
                 StrictHostKeyChecking no
 
               Match User ec2-user
-                IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+                IdentityFile ~/.ssh/id_rsa
                 StrictHostKeyChecking no
 
               Match User core
-                IdentityFile ~/.ssh/cluster-{{ GUID }}-key
+                IdentityFile ~/.ssh/id_rsa
                 StrictHostKeyChecking no
 
               Host *
@@ -163,53 +211,54 @@
         groups: jumpbox
       when: jumpboxes.instances[0] is defined
 
-    - name: prep jumpbox
-      hosts: jumpbox
-      vars:
-        GUID: "{{ lookup('env', 'GUID') }}"
-        HOME: "{{ lookup('env', 'HOME') }}"
-        ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
-      tasks:
+- name: prep jumpbox
+  hosts: jumpbox
+  vars:
+    GUID: "{{ lookup('env', 'GUID') }}"
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
 
-        - name: put kubeconfig on jumpbox
-          copy:
-            src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
-            dest: "{{ ansible_env.HOME }}/kubeconfig"
+  tasks:
 
-        - name: copy cluster ssh key to jumpbox
-          copy:
-            src: "{{ HOME }}/.ssh/cluster-{{ GUID }}-key"
-            dest: "{{ ansible_env.HOME }}/.ssh/"
-            mode: 0600
+    - name: put kubeconfig on jumpbox
+      copy:
+        src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
+        dest: "{{ ansible_env.HOME }}/kubeconfig"
 
-        - name: delete jumpbox ssh config
-          file:
-            dest: "{{ ssh_config }}"
-            state: absent
+    - name: copy cluster ssh key to jumpbox
+      copy:
+        src: "{{ HOME }}/.ssh/id_rsa"
+        dest: "{{ ansible_env.HOME }}/.ssh/"
+        mode: 0600
 
-        - name: create empty ssh config
-          file:
-            dest: "{{ ssh_config }}"
-            state: touch
-            mode: 0600
+    - name: delete jumpbox ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: absent
 
-        - name: setup ssh config on jumpbox
-          blockinfile:
-            dest: "{{ ssh_config }}"
-            marker: "##### {mark} ADD default key and user"
-            content: |
-              Host *
-                IdentityFile {{ ansible_env.HOME }}/.ssh/cluster-{{ GUID }}-key
-                User core
-                StrictHostKeyChecking no
-                ControlPath /tmp/{{ GUID }}-%r-%h-%p
-                ControlPersist 5m
+    - name: create empty ssh config
+      file:
+        dest: "{{ ssh_config }}"
+        state: touch
+        mode: 0600
 
-        - name: show jumpbox info
-          debug:
-            # var: groups["jumpbox"].host_name
-            msg:
-             - "SSH to Jumpbox: ssh {{ groups['jumpbox'][0] }}"
-             - "SSH to Master: ssh {{ groups['control_plane'][0] }}"
+    - name: setup ssh config on jumpbox
+      blockinfile:
+        dest: "{{ ssh_config }}"
+        marker: "##### {mark} ADD default key and user"
+        content: |
+          Host *
+            IdentityFile {{ ansible_env.HOME }}/.ssh/id_rsa
+            User core
+            StrictHostKeyChecking no
+            ControlPath /tmp/{{ GUID }}-%r-%h-%p
+            ControlPersist 5m
+
+    - name: show jumpbox info
+      debug:
+        # var: groups["jumpbox"].host_name
+        msg:
+         - "SSH to Jumpbox: ssh {{ groups['jumpbox'][0] }}"
+         - "SSH to Master: ssh {{ groups['control_plane'][0] }}"
 
 

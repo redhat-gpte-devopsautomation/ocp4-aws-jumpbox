@@ -1,15 +1,26 @@
 ---
-- name: setup jumpbox
+- name: BEGIN setup jumpbox playbook
   hosts: localhost
   connection: local
   vars:
-    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
-    GUID: "{{ lookup('env', 'GUID') }}"
     HOME: "{{ lookup('env', 'HOME') }}"
+    # need to set GUID because this playbook not run under agnosticD
+    GUID: "{{ lookup('env', 'GUID') }}"
     ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
+    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
 
   tasks:
 
+    - name: find proper ssh keyfile - stat the cluster-GUID-key version like in GPTE classes
+      stat:
+        path: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ GUID }}-key"
+      register: r_cluster_key_stat
+
+    - name: find proper ssh keyfile - set the cluster-GUID-key version like in GPTE classes
+      set_fact:
+        cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ GUID }}-key"
+      when: r_cluster_key_stat.stat.exists
+    
     - name: find the clientvm's region
       uri:
         url: http://169.254.169.254/latest/meta-data/placement/availability-zone
@@ -101,11 +112,11 @@
     - when: jumpboxes["instances"][0] is not defined
       block:
 
-        - name: Put the cluster keypair in AWS for jumphost
+        - name: upload the cluster keypair to AWS for jumphost
           ec2_key:
             profile: default
             name: cluster_keypair
-            key_material: "{{ lookup('file', '/home/ec2-user/.ssh/id_rsa.pub') }}"
+            key_material: "{{ lookup('file', cluster_key_filename + '.pub') }}"
 
         - name: Create SSH security group
           vars:
@@ -151,10 +162,6 @@
             wait: true
           register: jumpbox
 
-        - name: debug me
-          debug:
-            var: jumpbox
-
         - name: Add jumpbox instance public IP to host group
           add_host:
             name: "{{ jumpbox.instances[0].public_ip }}"
@@ -186,11 +193,11 @@
                 StrictHostKeyChecking no
 
               Match User ec2-user
-                IdentityFile ~/.ssh/id_rsa
+                IdentityFile {{ cluster_key_filename }}
                 StrictHostKeyChecking no
 
               Match User core
-                IdentityFile ~/.ssh/id_rsa
+                IdentityFile {{ cluster_key_filename }}
                 StrictHostKeyChecking no
 
               Host *
@@ -214,8 +221,8 @@
 - name: prep jumpbox
   hosts: jumpbox
   vars:
-    GUID: "{{ lookup('env', 'GUID') }}"
     HOME: "{{ lookup('env', 'HOME') }}"
+    GUID: "{{ lookup('env', 'GUID') }}"
     ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
 
   tasks:
@@ -225,11 +232,15 @@
         src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
         dest: "{{ ansible_env.HOME }}/kubeconfig"
 
+    - debug: var=hostvars.localhost
+
+
     - name: copy cluster ssh key to jumpbox
       copy:
-        src: "{{ HOME }}/.ssh/id_rsa"
-        dest: "{{ ansible_env.HOME }}/.ssh/"
+        src: "{{ hostvars.localhost.real_cluster_key_filename }}"
+        dest: "{{ ansible_env.HOME }}/.ssh/id_rsa"
         mode: 0600
+
 
     - name: delete jumpbox ssh config
       file:
@@ -248,7 +259,7 @@
         marker: "##### {mark} ADD default key and user"
         content: |
           Host *
-            IdentityFile {{ ansible_env.HOME }}/.ssh/id_rsa
+            IdentityFile ~/.ssh/id_rsa
             User core
             StrictHostKeyChecking no
             ControlPath /tmp/{{ GUID }}-%r-%h-%p

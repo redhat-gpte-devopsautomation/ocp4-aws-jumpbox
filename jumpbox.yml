@@ -20,6 +20,10 @@
       set_fact:
         cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ GUID }}-key"
       when: r_cluster_key_stat.stat.exists
+
+    - name: set GUID as fact
+      set_fact:
+        GUID: "{{ lookup('env', 'GUID') }}"
     
     - name: find the clientvm's region
       uri:
@@ -222,14 +226,13 @@
   hosts: jumpbox
   vars:
     HOME: "{{ lookup('env', 'HOME') }}"
-    GUID: "{{ lookup('env', 'GUID') }}"
     ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
 
   tasks:
 
     - name: put kubeconfig on jumpbox
       copy:
-        src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
+        src: "{{ HOME }}/cluster-{{ hostvars.localhost.GUID }}/auth/kubeconfig"
         dest: "{{ ansible_env.HOME }}/kubeconfig"
 
     - debug: var=hostvars.localhost
@@ -262,7 +265,7 @@
             IdentityFile ~/.ssh/id_rsa
             User core
             StrictHostKeyChecking no
-            ControlPath /tmp/{{ GUID }}-%r-%h-%p
+            ControlPath /tmp/{{ hostvars.localhost.GUID }}-%r-%h-%p
             ControlPersist 5m
 
     - name: show jumpbox info

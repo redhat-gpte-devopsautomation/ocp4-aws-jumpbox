@@ -3,28 +3,37 @@
   hosts: localhost
   connection: local
   vars:
-    HOME: "{{ lookup('env', 'HOME') }}"
+    # HOME: "{{ lookup('env', 'HOME') }}"
     # need to set GUID because this playbook not run under agnosticD
-    GUID: "{{ lookup('env', 'GUID') }}"
-    ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
-    cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
+    # ssh_config: "{{ lookup('env', 'HOME') }}/.ssh/config"
+    # cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
 
   tasks:
 
+    - setup:
+      register: r_setup
+
+    - debug: var=r_setup
+
+    - name: get GUID
+      set_fact:
+        GUID: "{{ ansible_nodename.split('.')[1] }}"
+        HOME: "{{ ansible_env.HOME }}"
+
+    - name: find proper ssh keyfile - stat the cluster-GUID-key version like in GPTE classes
+      set_fact:
+        cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/id_rsa"
+
     - name: find proper ssh keyfile - stat the cluster-GUID-key version like in GPTE classes
       stat:
-        path: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ GUID }}-key"
+        path: "{{ HOME }}/.ssh/cluster-{{ GUID }}-key"
       register: r_cluster_key_stat
 
     - name: find proper ssh keyfile - set the cluster-GUID-key version like in GPTE classes
       set_fact:
-        cluster_key_filename: "{{ lookup('env', 'HOME') }}/.ssh/cluster-{{ GUID }}-key"
+        cluster_key_filename: "{{ HOME }}/.ssh/cluster-{{ GUID }}-key"
       when: r_cluster_key_stat.stat.exists
 
-    - name: set GUID as fact
-      set_fact:
-        GUID: "{{ lookup('env', 'GUID') }}"
-    
     - name: find the clientvm's region
       uri:
         url: http://169.254.169.254/latest/meta-data/placement/availability-zone
@@ -216,34 +225,37 @@
             delay: 10
             timeout: 180
 
+    - debug: var=GUID
+
     - name: add existing jumpbox to inventory
       add_host:
         name: "{{ jumpboxes.instances[0].public_ip_address }}"
         groups: jumpbox
+        GUID: "{{ GUID }}"
       when: jumpboxes.instances[0] is defined
 
 - name: prep jumpbox
   hosts: jumpbox
   vars:
-    HOME: "{{ lookup('env', 'HOME') }}"
+    HOME: "{{ HOME }}"
     ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
 
   tasks:
 
+    - debug: var=hostvars
+
     - name: put kubeconfig on jumpbox
       copy:
-        src: "{{ HOME }}/cluster-{{ hostvars.localhost.GUID }}/auth/kubeconfig"
+        # src: "{{ HOME }}/cluster-{{ GUID }}/auth/kubeconfig"
+        src: "{{ lookup( 'env', 'KUBECONFIG') }}"
         dest: "{{ ansible_env.HOME }}/kubeconfig"
-
-    - debug: var=hostvars.localhost
-
+ 
 
     - name: copy cluster ssh key to jumpbox
       copy:
-        src: "{{ hostvars.localhost.real_cluster_key_filename }}"
+        src: "{{ hostvars.localhost.cluster_key_filename }}"
         dest: "{{ ansible_env.HOME }}/.ssh/id_rsa"
         mode: 0600
-
 
     - name: delete jumpbox ssh config
       file:
@@ -265,7 +277,7 @@
             IdentityFile ~/.ssh/id_rsa
             User core
             StrictHostKeyChecking no
-            ControlPath /tmp/{{ hostvars.localhost.GUID }}-%r-%h-%p
+            ControlPath /tmp/GUID-%r-%h-%p
             ControlPersist 5m
 
     - name: show jumpbox info
@@ -274,5 +286,4 @@
         msg:
          - "SSH to Jumpbox: ssh {{ groups['jumpbox'][0] }}"
          - "SSH to Master: ssh {{ groups['control_plane'][0] }}"
-
 
